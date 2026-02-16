@@ -1,26 +1,25 @@
-# Core
-streamlit>=1.28.0,<1.31.0
+# Core UI & data handling
+streamlit>=1.28.0
 pandas>=2.0.0
-numpy>=1.24.0
-
-# PDF Processing
-pdfplumber>=0.10.0
-pypdf>=3.0.0
-img2pdf>=0.4.4
-Pillow>=10.0.0
-
-# Word Processing
-python-docx>=0.8.11
-pdf2docx>=0.5.6
-docx2pdf>=0.1.8; sys_platform == 'win32'
-
-# Excel
 openpyxl>=3.1.0
 
-# Utilities
-fuzzywuzzy>=0.18.0
-python-Levenshtein>=0.21.0  # Faster fuzzy matching
-pywin32>=306; sys_platform == 'win32'
+# PDF processing
+pdfplumber>=0.10.0
+pypdf>=3.15.0
+img2pdf>=0.4.4
 
-# Build tools
-pyinstaller>=6.0.0
+# Word document handling
+python-docx>=0.8.11
+pdf2docx>=0.5.6
+
+# Fuzzy matching (for Payslip Renamer)
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0   # speeds up fuzzywuzzy
+
+# Image processing
+Pillow>=10.0.0
+
+# Windows‑only: DOCX → PDF conversion (requires MS Word installed)
+# Remove these two lines if deploying on Linux/macOS
+docx2pdf>=0.1.8
+pywin32>=306
