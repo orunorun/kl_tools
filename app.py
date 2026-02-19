@@ -26,31 +26,78 @@ from PIL import Image                       # Pillow – image handling
 import img2pdf                              # loss‑less PNG → PDF
 from docx2pdf import convert                # DOCX → PDF (requires MS Word on Windows)
 
+# ------------------------------------------------------------------
+# Additional imports for the cross‑platform DOCX → PDF conversion
+# ------------------------------------------------------------------
+import sys
+import subprocess
+
 # --------------------------------------------------------------
 # Helper for COM‑initialisation (required by docx2pdf on Windows)
 # --------------------------------------------------------------
 def convert_docx_to_pdf(docx_path: str, pdf_path: str) -> bool:
     """
-    Convert a .docx to .pdf using docx2pdf.
-    On Windows the COM library must be initialised in each thread.
+    Convert a .docx file to .pdf.
+
+    * Windows → uses docx2pdf (requires Microsoft Word)
+    * macOS / Linux → uses LibreOffice headless conversion (requires `soffice`)
+
+    Returns True on success, False on any error (and shows a Streamlit error widget).
     """
     try:
-        import pythoncom
-        pythoncom.CoInitialize()
-    except Exception:  # pragma: no‑cover – pywin32 not available on non‑Windows
-        pass
-    try:
-        convert(docx_path, pdf_path)
+        # ---------------- Windows (COM) ----------------
+        if sys.platform.startswith("win"):
+            try:
+                import pythoncom
+                pythoncom.CoInitialize()
+            except Exception:  # pragma: no‑cover
+                pass
+
+            # docx2pdf.convert raises an exception on failure
+            convert(docx_path, pdf_path)
+            return True
+
+        # ---------------- macOS / Linux (LibreOffice) -------------
+        # LibreOffice must be on the PATH as `soffice`.
+        out_dir = os.path.dirname(pdf_path) or "."
+        cmd = [
+            "soffice",
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            out_dir,
+            docx_path,
+        ]
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            text=True,
+        )
+        # Generated PDF has the same stem as the source file
+        generated_pdf = os.path.join(out_dir, Path(docx_path).with_suffix(".pdf").name)
+        if not os.path.exists(generated_pdf):
+            raise RuntimeError(
+                f"LibreOffice conversion failed – see stdout/stderr.\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+        # Move the file to the exact location requested by the caller
+        shutil.move(generated_pdf, pdf_path)
         return True
-    except Exception as e:
-        st.error(f"❌ Failed to convert {Path(docx_path).name}: {e}")
+
+    except Exception as e:  # pragma: no‑cover – any unexpected error
+        st.error(f"❌ Failed to convert **{Path(docx_path).name}** – {e}")
         return False
     finally:
-        try:
-            import pythoncom
-            pythoncom.CoUninitialize()
-        except Exception:  # pragma: no‑cover
-            pass
+        # On Windows we need to un‑initialise COM for the current thread.
+        if sys.platform.startswith("win"):
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except Exception:  # pragma: no‑cover
+                pass
 
 
 # --------------------------------------------------------------
@@ -67,7 +114,7 @@ st.markdown(
     """
     <style>
         .main-header {font-size:2.5rem; font-weight:700; color:#FF6B00; text-align:center; margin-bottom:.5rem;}
-        .sub-header {font-size:1.1rem; color:#1E3A8A; text-align:center; margin-bottom:2rem; font-weight:500;}
+        .sub-header {font-size:1.1rem; color:#1E3A8B; text-align:center; margin-bottom:2rem; font-weight:500;}
         .tool-card {background:#f8f9fa; border-radius:10px; padding:20px; border-left:5px solid #FF6B00; margin-bottom:20px;}
         .download-box {background:#fff7ed; border:2px solid #FF6B00; border-radius:10px; padding:20px; margin:20px 0;}
         .merge-field {background:#ffedd5; color:#c2410c; padding:2px 8px; border-radius:4px;
@@ -77,7 +124,7 @@ st.markdown(
         .stButton>button {width:100%; border-radius:8px; height:3rem; font-weight:600;
                           background:#FF6B00; color:#fff; border:none;}
         .stButton>button:hover {background:#e55a00;}
-        .footer-text {text-align:center; color:#1E3A8A; padding:20px; font-weight:600;}
+        .footer-text {text-align:center; color:#1E3A8B; padding:20px; font-weight:600;}
         .kl-orange {color:#FF6B00;}
     </style>
     """,
@@ -98,7 +145,8 @@ for key in [
     "template_bytes",
     "png_files", "png_zip",
     "compress_zip", "compress_single", "compression_stats",
-    "pdf_zip", "pdf_single", "pdf_count",          # DOCX → PDF keys
+    # DOCX → PDF keys (renamed to avoid clashes with other tools)
+    "docxpdf_zip", "docxpdf_single", "docxpdf_count",
 ]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -645,7 +693,6 @@ elif tool == "📧 Mail Merge":
             )
 
         if merge_fields:
-            # FOUR opening & FOUR closing braces -> {{Field}}
             placeholder_str = ", ".join([f"{{{{{fld}}}}}" for fld in merge_fields])
             st.success(f"✅ Detected placeholders: {placeholder_str}")
         else:
@@ -875,12 +922,14 @@ elif tool == "📄 DOCX to PDF":
     st.markdown("Convert Word documents to PDF while preserving layout.")
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # ---- File upload -------------------------------------------------
     docx_files = st.file_uploader(
         "Select DOCX files", type=["docx"], accept_multiple_files=True, key="docx2pdf"
     )
     if docx_files:
         out_mode = st.radio(
-            "Download as", ["📦 ZIP (individual PDFs)", "📄 Single merged PDF"], key="docx2pdf_out"
+            "Download as", ["📦 ZIP (individual PDFs)", "📄 Single merged PDF"],
+            key="docx2pdf_out"
         )
         if st.checkbox("Show preview of first document (debug)"):
             doc = Document(io.BytesIO(docx_files[0].getvalue()))
@@ -889,25 +938,38 @@ elif tool == "📄 DOCX to PDF":
 
         if st.button("📄 Convert to PDF", type="primary"):
             with st.spinner("Converting DOCX files to PDF (parallel)…"):
-                pdfs = []
+                pdfs = []   # list of (filename, bytes)
 
                 def _docx_to_pdf_one(docx):
+                    # Write uploaded docx to a temp file
                     tmp_docx = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
                     tmp_docx.write(docx.getvalue())
                     tmp_docx.close()
+
+                    # Destination PDF (another temp file)
                     tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
                     tmp_pdf.close()
+
+                    # ----- Actual conversion -----
                     success = convert_docx_to_pdf(tmp_docx.name, tmp_pdf.name)
                     if not success:
+                        # Clean up any leftovers and return None → filtered out later
                         os.remove(tmp_docx.name)
                         os.remove(tmp_pdf.name)
                         return None
+
+                    # Read the generated PDF back into memory
                     with open(tmp_pdf.name, "rb") as f:
                         data = f.read()
+
+                    # Remove temporary files
                     os.remove(tmp_docx.name)
                     os.remove(tmp_pdf.name)
+
+                    # Return a user‑friendly name (original stem + .pdf)
                     return (Path(docx.name).stem + ".pdf", data)
 
+                # ---- Parallel execution ----
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(_docx_to_pdf_one, d) for d in docx_files]
                     for fut in concurrent.futures.as_completed(futures):
@@ -915,32 +977,44 @@ elif tool == "📄 DOCX to PDF":
                         if res:
                             pdfs.append(res)
 
+                # ---- Build the download artefact ----
                 if out_mode == "📦 ZIP (individual PDFs)":
-                    st.session_state.pdf_zip = create_zip_from_files(pdfs)
-                    st.session_state.pdf_single = None
+                    st.session_state.docxpdf_zip = create_zip_from_files(pdfs)
+                    st.session_state.docxpdf_single = None
                 else:
+                    # Merge everything into one PDF
                     merger = PdfWriter()
                     for _, data in pdfs:
                         merger.append_pages_from_reader(PdfReader(io.BytesIO(data)))
                     merged_buf = io.BytesIO()
                     merger.write(merged_buf)
-                    st.session_state.pdf_single = merged_buf.getvalue()
-                    st.session_state.pdf_zip = None
+                    st.session_state.docxpdf_single = merged_buf.getvalue()
+                    st.session_state.docxpdf_zip = None
 
-                st.session_state.pdf_count = len(pdfs)
+                st.session_state.docxpdf_count = len(pdfs)
                 st.success(f"✅ Converted {len(pdfs)} document(s)")
 
-    if st.session_state.get("pdf_count"):
+    if st.session_state.get("docxpdf_count"):
         st.markdown('<div class="download-box">', unsafe_allow_html=True)
         st.subheader("📥 Download PDFs")
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("PDFs created", st.session_state.pdf_count)
+            st.metric("PDFs created", st.session_state.docxpdf_count)
         with c2:
-            if st.session_state.get("pdf_zip"):
-                st.download_button("⬇️ ZIP", st.session_state.pdf_zip, "docx_to_pdf.zip")
+            if st.session_state.get("docxpdf_zip"):
+                st.download_button(
+                    "⬇️ ZIP",
+                    st.session_state.docxpdf_zip,
+                    "docx_to_pdf.zip",
+                    mime="application/zip",
+                )
             else:
-                st.download_button("⬇️ PDF", st.session_state.pdf_single, "merged.pdf", "application/pdf")
+                st.download_button(
+                    "⬇️ PDF",
+                    st.session_state.docxpdf_single,
+                    "merged.pdf",
+                    mime="application/pdf",
+                )
         st.markdown("</div>", unsafe_allow_html=True)
 
 
